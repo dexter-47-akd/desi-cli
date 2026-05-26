@@ -88,7 +88,7 @@ version_info() {
 
 update_script() {
     printf "[branch:%s] Checking for Update..\n" "$branch"
-    update="$(curl --fail-with-body -sL -A "$agent" "https://raw.githubusercontent.com/dexter-47-akd/desi-cli/$branch/desi-cli")" || die "[branch:$branch] Connection error: $update"
+    update="$(curl --fail-with-body -sL -A "$agent" "https://raw.githubusercontent.com/dexter-47-akd/-arvndhl-desi-cli/$branch/desi-cli")" || die "[branch:$branch] Connection error: $update"
     printf '%s' "$update" | grep -q "^version_number" || die "[branch:$branch] Invalid Response."
     update="$(printf '%s\n' "$update" | diff -u "$0" -)"
     if [ -z "$update" ]; then
