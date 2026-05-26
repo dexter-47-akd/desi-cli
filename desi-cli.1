@@ -1,0 +1,153 @@
+.TH DESI-CLI 1 "May 2026" "1.0.0" "User Commands"
+.SH NAME
+desi\-cli \- browse, stream, and download Indian movies and TV series
+.SH SYNOPSIS
+.B desi\-cli
+[options] [query]
+.br
+.B desi\-cli
+[query] [options]
+.SH DESCRIPTION
+Browse, stream, and download Bollywood, Marathi, Tamil, Telugu, Malayalam,
+Kannada, Bengali, and Punjabi movies and TV series from the terminal.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-continue
+Continue watching from history.
+.TP
+.BR \-d ", " \-\-download
+Download media instead of playing.
+.TP
+.BR \-D ", " \-\-delete
+Delete watch history.
+.TP
+.BR \-l ", " \-\-language " <lang>"
+Language filter. Supported values: all, hindi, marathi, tamil, telugu,
+malayalam, kannada, bengali, punjabi.
+.TP
+.BR \-p ", " \-\-provider " <provider>"
+Source provider. Supported: youtube, url.
+.TP
+.BR \-q ", " \-\-quality " <quality>"
+Specify quality (720p, 1080p, best, worst).
+.TP
+.BR \-v ", " \-\-vlc
+Use VLC instead of mpv.
+.TP
+.BR \-s ", " \-\-syncplay
+Use Syncplay for synchronized viewing.
+.TP
+.BR \-S ", " \-\-select\-nth " <n>"
+Select the nth search result directly (non\-interactive).
+.TP
+.BR \-e ", " \-\-episode " <n>"
+Episode number (for series).
+.TP
+.BR \-r ", " \-\-range " <start-end>"
+Episode range (e.g., 1\-10).
+.TP
+.BR \-\-season " <n>"
+Season number (default: 1).
+.TP
+.BR \-\-url " <URL>"
+Direct URL (YouTube, Einthusan, or any yt\-dlp\-supported site).
+.TP
+.BR \-\-cookies\-file " <file>"
+Path to a cookies.txt file for YouTube authentication.
+.TP
+.BR \-V ", " \-\-version
+Show version number.
+.TP
+.BR \-h ", " \-\-help
+Show help message.
+.TP
+.BR \-U ", " \-\-update " [branch]"
+Update the script. Optionally specify a git branch.
+.TP
+.BR \-\-rofi
+Use rofi instead of fzf.
+.TP
+.BR \-\-dmenu
+Use dmenu instead of fzf.
+.TP
+.BR \-\-no\-detach
+Don't detach player (for in\-terminal playback).
+.TP
+.BR \-\-exit\-after\-play
+Exit after playing (non\-interactive mode).
+.TP
+.BR \-\-debug
+Print debug information.
+.SH EXAMPLES
+.TP
+Search and play a movie:
+desi\-cli sholay
+.TP
+Search with language filter:
+desi\-cli \-l marathi duniyadari
+.TP
+Direct URL playback:
+desi\-cli \-\-url https://einthusan.tv/movie/watch/example/
+.TP
+Watch a TV series episode:
+desi\-cli \-l hindi \-e 1 sacred games
+.TP
+Download in 1080p:
+desi\-cli \-d \-q 1080p RRR
+.TP
+Resume from history:
+desi\-cli \-\-continue
+.TP
+Use cookies for YouTube authentication:
+desi\-cli \-\-cookies\-file cookies.txt \-\-url <url>
+.SH ENVIRONMENT
+.TP
+.B DESI_CLI_PLAYER
+Player command (default: auto\-detected).
+.TP
+.B DESI_CLI_DOWNLOAD_DIR
+Download directory (default: current directory).
+.TP
+.B DESI_CLI_QUALITY
+Default quality (default: best).
+.TP
+.B DESI_CLI_LANG
+Default language filter (default: all).
+.TP
+.B DESI_CLI_PROVIDER
+Default provider (default: auto).
+.TP
+.B DESI_CLI_NO_DETACH
+Don't detach player (default: 0).
+.TP
+.B DESI_CLI_EXIT_AFTER_PLAY
+Exit after playing (default: 0).
+.TP
+.B DESI_CLI_EXTERNAL_MENU
+Use external menu: 0=fzf, 1=rofi, 2=dmenu (default: 0).
+.TP
+.B DESI_CLI_HIST_DIR
+History directory (default: $XDG_STATE_HOME/desi\-cli or
+$HOME/.local/state/desi\-cli).
+.TP
+.B DESI_CLI_BRANCH
+Git branch for updates (default: master).
+.SH NOTES
+YouTube extraction may require authentication for some content.
+If extraction fails, export cookies from your browser using the
+"Get cookies.txt" extension and pass them with \-\-cookies-file.
+.SH DEPENDENCIES
+yt\-dlp, fzf (or rofi/dmenu), mpv (or vlc/iina/syncplay),
+curl, sed, grep, awk.
+.SH FILES
+.I $HOME/.local/state/desi\-cli/desi\-hsts
+.RS
+Watch history file.
+.RE
+.SH AUTHORS
+Inspired by ani\-cli (https://github.com/pystardust/ani\-cli).
+.SH LICENSE
+GNU General Public License v3.0 or later.
+.SH SEE ALSO
+.IR yt\-dlp (1),
+.IR mpv (1)

@@ -1,0 +1,1038 @@
+#!/bin/sh
+
+version_number="1.0.0"
+
+# ===== UI FUNCTIONS (from ani-cli) =====
+
+external_menu() {
+    [ "$use_external_menu" = "1" ] && rofi "$1" -sort -dmenu -i -width 1500 -p "$2" "$3"
+    [ "$use_external_menu" = "2" ] && dmenu -l 20 -p "$2"
+}
+
+launcher() {
+    [ "$use_external_menu" = "0" ] && [ -z "$1" ] && set -- "+m" "$2"
+    [ "$use_external_menu" = "0" ] && fzf "$1" --reverse --cycle --prompt "$2"
+    [ "$use_external_menu" = "1" ] && external_menu "$1" "$2" "$external_menu_args"
+    [ "$use_external_menu" = "2" ] && external_menu "$1" "$2"
+}
+
+nth() {
+    stdin=$(cat -)
+    [ -z "$stdin" ] && return 1
+    line_count="$(printf "%s\n" "$stdin" | wc -l | tr -d "[:space:]")"
+    [ "$line_count" -eq 1 ] && printf "%s" "$stdin" | cut -f2,3 && return 0
+    prompt="$1"
+    multi_flag=""
+    [ $# -ne 1 ] && shift && multi_flag="$1"
+    line=$(printf "%s" "$stdin" | cut -f1,3 | tr '\t' ' ' | launcher "$multi_flag" "$prompt" | cut -d " " -f 1)
+    line_start=$(printf "%s" "$line" | head -n1)
+    line_end=$(printf "%s" "$line" | tail -n1)
+    [ -n "$line" ] || exit 1
+    if [ "$line_start" = "$line_end" ]; then
+        printf "%s" "$stdin" | grep -E '^'"${line}"'($|[[:space:]])' | cut -f2,3 || exit 1
+    else
+        printf "%s" "$stdin" | sed -n '/^'"${line_start}"'$/,/^'"${line_end}$"'/p' || exit 1
+    fi
+}
+
+die() {
+    printf "\33[2K\r\033[1;31m%s\033[0m\n" "$*" >&2
+    exit 1
+}
+
+help_info() {
+    printf "
+    Usage:
+    %s [options] [query]
+    %s [query] [options]
+
+    Options:
+      -c, --continue        Continue watching from history
+      -d, --download        Download instead of playing
+      -D, --delete          Delete history
+      -l, --language        Language filter (hindi/marathi/tamil/telugu/malayalam/kannada/bengali/punjabi)
+      -p, --provider        Source (youtube/zee5(browser)/url)
+      -q, --quality         Specify quality (720p, 1080p, best, worst)
+      -v, --vlc             Use VLC instead of mpv
+      -s, --syncplay        Use Syncplay to watch with friends
+      -S, --select-nth      Select nth entry directly
+      -e, --episode         Episode number (for series)
+      -r, --range           Episode range (e.g. 1-10)
+      --season              Season number (default: 1)
+      --url <URL>           Direct URL (ZEE5, MX Player, Einthusan, YouTube, or any yt-dlp supported site)
+      --cookies-file <FILE>  Path to cookies.txt file for YouTube auth
+      -V, --version         Show version
+      -h, --help            Show this help
+      -U, --update          Update the script
+      --rofi                Use rofi instead of fzf
+      --dmenu               Use dmenu instead of fzf
+      --no-detach           Don't detach player (for in-terminal playback)
+      --exit-after-play     Exit after playing (non-interactive)
+      --debug               Print debug information
+
+    Examples:
+      %s sholay
+      %s -l marathi duniyadari
+      %s --url https://einthusan.tv/movie/watch/example/
+      %s -l hindi -e 1 sacred games
+      %s -d -q 1080p RRR
+      %s --continue
+    \n" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}"
+    exit 0
+}
+
+version_info() {
+    printf "%s\n" "$version_number"
+    exit 0
+}
+
+update_script() {
+    printf "[branch:%s] Checking for Update..\n" "$branch"
+    update="$(curl --fail-with-body -sL -A "$agent" "https://raw.githubusercontent.com/arvndhl/desi-cli/$branch/desi-cli")" || die "[branch:$branch] Connection error: $update"
+    printf '%s' "$update" | grep -q "^version_number" || die "[branch:$branch] Invalid Response."
+    update="$(printf '%s\n' "$update" | diff -u "$0" -)"
+    if [ -z "$update" ]; then
+        printf "[branch:%s] Script is up to date\n" "$branch"
+    else
+        if printf '%s\n' "$update" | patch "$0" -; then
+            printf "[branch:%s] Script has been updated\n" "$branch"
+        else
+            die "[branch:$branch] Can't update for some reason!"
+        fi
+    fi
+    exit 0
+}
+
+dep_ch() {
+    for dep; do
+        command -v "${dep%% *}" >/dev/null || die "Program \"${dep%% *}\" not found. Please install it."
+    done
+}
+
+open_browser() {
+    url="$1"
+    case "$(uname -a | cut -d " " -f 1,3-)" in
+        *MINGW*|*MSYS*) cmd //c start "$url" >/dev/null 2>&1 ;;
+        *Darwin*) open "$url" >/dev/null 2>&1 ;;
+        *Linux*) xdg-open "$url" >/dev/null 2>&1 ;;
+        *) printf "\33[2K\r\033[1;33mOpen this URL in your browser:\033[0m\n%s\n" "$url" >&2 ;;
+    esac
+}
+
+where_iina() {
+    [ -e "/Applications/IINA.app/Contents/MacOS/iina-cli" ] && echo "/Applications/IINA.app/Contents/MacOS/iina-cli" && return 0
+    printf "%s" "iina" && return 0
+}
+
+where_mpv() {
+    command -v "flatpak" >/dev/null && flatpak info io.mpv.Mpv >/dev/null 2>&1 && printf "%s" "flatpak_mpv" && return 0
+    printf "%s" "mpv" && return 0
+}
+
+cleanup() {
+    printf "\033[0m"
+    rm -f "${histfile}.new"
+}
+
+# ===== PROVIDER FUNCTIONS =====
+
+select_provider() {
+    provider=$(printf "youtube\nzee5 (browser)\nurl" | launcher "" "Select source: ")
+    [ -z "$provider" ] && provider="youtube"
+}
+
+select_language() {
+    language=$(printf "all\nhindi\nmarathi\ntamil\ntelugu\nmalayalam\nkannada\nbengali\npunjabi" | launcher "" "Select language: ")
+    [ -z "$language" ] && language="all"
+}
+
+# Build search query with language context
+build_search_query() {
+    raw_query="$1"
+    lang="$2"
+    content_type="$3"
+
+    case "$lang" in
+        all) lang_suffix="" ;;
+        hindi) lang_suffix="hindi" ;;
+        marathi) lang_suffix="marathi" ;;
+        tamil) lang_suffix="tamil" ;;
+        telugu) lang_suffix="telugu" ;;
+        malayalam) lang_suffix="malayalam" ;;
+        kannada) lang_suffix="kannada" ;;
+        bengali) lang_suffix="bengali" ;;
+        punjabi) lang_suffix="punjabi" ;;
+        *) lang_suffix="$lang" ;;
+    esac
+
+    if [ -n "$lang_suffix" ]; then
+        query_full="${raw_query} ${lang_suffix}"
+    else
+        query_full="${raw_query}"
+    fi
+
+    if [ "$content_type" = "movie" ]; then
+        query_full="${query_full} movie"
+    fi
+
+    printf "%s" "$query_full" | sed 's/^ *//;s/ *$//'
+}
+
+# ===== YOUTUBE PROVIDER =====
+
+search_youtube() {
+    search_query="$1"
+    search_url="ytsearch15:${search_query}"
+
+    if [ "$debug" = 1 ]; then
+        printf "\33[2K\r\033[1;33m[YouTube] Searching: %s\033[0m\n" "$search_query" >&2
+    fi
+
+    yt_output=$(yt-dlp "$search_url" --flat-playlist --print "$(printf '%s\t%s\t%s\t%s' '%(title)s' '%(id)s' '%(channel)s' '%(duration)s')" 2>/dev/null)
+
+    if [ -z "$yt_output" ]; then
+        return 1
+    fi
+
+    index=1
+    printf "%s" "$yt_output" | while IFS='	' read -r title id channel duration_float; do
+        [ -z "$title" ] && continue
+        url="https://www.youtube.com/watch?v=${id}"
+
+        duration_str=""
+        if [ -n "$duration_float" ] && [ "$duration_float" != "null" ] && [ "$duration_float" != "None" ]; then
+            duration_int=$(printf "%s" "$duration_float" | sed 's/\.[0-9]*//')
+            [ -z "$duration_int" ] && duration_int=0
+            mins=$((duration_int / 60)) 2>/dev/null
+            secs=$((duration_int % 60)) 2>/dev/null
+            duration_str="${mins}m${secs}s"
+        fi
+
+        label="${title}"
+        [ -n "$duration_str" ] && label="${label} [${duration_str}]"
+        [ -n "$channel" ] && label="${label} | ${channel}"
+
+        printf "%s\t%s\t%s\n" "$index" "$url" "$label"
+        index=$((index + 1))
+    done
+}
+
+get_youtube_video_url() {
+    video_url="$1"
+    quality="$2"
+
+    [ "$debug" = 1 ] && printf "\33[2K\r\033[1;33m[YouTube] Extracting video URL: %s\033[0m\n" "$video_url" >&2
+
+    case "$quality" in
+        best)   format="best[acodec!=?none]/best" ;;
+        worst)  format="worst[acodec!=?none]/worst" ;;
+        *p|*P)  h=$(printf "%s" "$quality" | sed 's/[pP]//')
+                format="best[height<=${h}][acodec!=?none]/best[height<=${h}]" ;;
+        0)      format="best[acodec!=?none]/best" ;;
+        *)      format="best[acodec!=?none]/best" ;;
+    esac
+
+    [ "$debug" = 1 ] && printf "\33[2K\r\033[1;33m[YouTube] Format: %s\033[0m\n" "$format" >&2
+
+    # Detect JS runtime (deno) and add to PATH
+    for deno_bin in "$HOME/.deno/bin" "$HOME/AppData/Roaming/npm/node_modules/deno" "$LOCALAPPDATA/npm/node_modules/deno"; do
+        if [ -f "$deno_bin/deno.exe" ] || [ -f "$deno_bin/deno" ]; then
+            PATH="$deno_bin:$PATH"
+            break
+        fi
+    done
+
+    js_args=""
+    remote_components=""
+    if command -v deno >/dev/null 2>&1; then
+        js_args="--js-runtimes deno"
+        remote_components="--remote-components ejs:github"
+        [ "$debug" = 1 ] && printf "\33[2K\r\033[1;33m[YouTube] Using JS runtime: deno\033[0m\n" >&2
+    fi
+
+    stream_url=""
+
+    # Attempt 1: with cookies file (if provided)
+    if [ -z "$stream_url" ] && [ -n "$cookies_file" ] && [ -f "$cookies_file" ]; then
+        stream_url=$(yt-dlp -f "$format" -g "$video_url" --cookies "$cookies_file" --socket-timeout 15 $js_args $remote_components 2>/dev/null)
+    fi
+
+    # Attempt 2: with cookies from browser
+    if [ -z "$stream_url" ]; then
+        for browser in chrome edge firefox brave opera; do
+            stream_url=$(yt-dlp -f "$format" -g "$video_url" --cookies-from-browser "$browser" --socket-timeout 15 $js_args $remote_components 2>/dev/null)
+            [ -n "$stream_url" ] && break
+        done
+    fi
+
+    # Attempt 3: normal extraction
+    if [ -z "$stream_url" ]; then
+        stream_url=$(yt-dlp -f "$format" -g "$video_url" --socket-timeout 15 $js_args $remote_components 2>/dev/null)
+    fi
+
+    # Attempt 4: android client
+    if [ -z "$stream_url" ]; then
+        stream_url=$(yt-dlp -f "$format" -g "$video_url" --extractor-args "youtube:player_client=android" --socket-timeout 15 $js_args $remote_components 2>/dev/null)
+    fi
+
+    # Attempt 5: worst quality
+    if [ -z "$stream_url" ]; then
+        stream_url=$(yt-dlp -f "worst" -g "$video_url" --socket-timeout 15 $js_args $remote_components 2>/dev/null)
+    fi
+
+    # Attempt 6: any format
+    if [ -z "$stream_url" ]; then
+        stream_url=$(yt-dlp -g "$video_url" --socket-timeout 20 $js_args $remote_components 2>/dev/null)
+    fi
+
+    if [ -z "$stream_url" ]; then
+        printf "\33[2K\r\033[1;33mYouTube extraction failed. The video may require sign-in.\033[0m\n" >&2
+        printf "\33[2K\r\033[1;33mTry:  yt-dlp --cookies-from-browser chrome \"$video_url\"\033[0m\n" >&2
+        printf "\33[2K\r\033[1;33mOr export cookies (Get cookies.txt extension) and use --cookies-file\033[0m\n" >&2
+    fi
+
+    printf "%s" "$stream_url"
+}
+
+get_youtube_title() {
+    video_url="$1"
+    yt-dlp --print title "$video_url" 2>/dev/null
+}
+
+# ===== ZEE5 PROVIDER =====
+
+search_zee5() {
+    search_query="$1"
+    encoded_query=$(printf "%s" "$search_query" | sed 's/ /+/g')
+
+    [ "$debug" = 1 ] && printf "\33[2K\r\033[1;33m[ZEE5] Searching via Mojeek: %s\033[0m\n" "$search_query" >&2
+
+    search_html=$(curl -sL -A "$agent" "https://www.mojeek.com/search?q=site:zee5.com+${encoded_query}" 2>/dev/null)
+
+    [ -z "$search_html" ] && return 1
+
+    index=1
+
+    printf "%s\n" "$search_html" | while IFS= read -r line; do
+        case "$line" in
+            *'class="title"'*)
+                url=$(printf "%s" "$line" | sed 's/.*href="\([^"]*\)".*/\1/')
+                title=$(printf "%s" "$line" | sed 's/.*class="title"[^>]*>\([^<]*\)<.*/\1/')
+                [ "$url" = "$line" ] && continue
+                [ "$title" = "$line" ] && continue
+                case "$url" in
+                    *zee5.com/movies/details/*|*zee5.com/shows/details/*|*zee5.com/global/videos/details/*)
+                        printf "%s\t%s\t%s\n" "$index" "$url" "$title"
+                        index=$((index + 1))
+                        ;;
+                esac
+                ;;
+        esac
+    done
+}
+
+# ===== EINTHUSAN PROVIDER =====
+
+get_einthusan_video_url() {
+    movie_url="$1"
+    quality="$2"
+
+    if [ "$debug" = 1 ]; then
+        printf "\33[2K\r\033[1;33m[Einthusan] Extracting video URL: %s\033[0m\n" "$movie_url" >&2
+    fi
+
+    case "$quality" in
+        best)
+            stream_url=$(yt-dlp -f "bestvideo+bestaudio/best" -g "$movie_url" 2>/dev/null)
+            ;;
+        worst)
+            stream_url=$(yt-dlp -f "worstvideo+worstaudio/worst" -g "$movie_url" 2>/dev/null)
+            ;;
+        *p | *P)
+            height=$(printf "%s" "$quality" | sed 's/[pP]//')
+            stream_url=$(yt-dlp -f "bestvideo[height<=${height}]+bestaudio/best[height<=${height}]" -g "$movie_url" 2>/dev/null)
+            ;;
+        0)
+            stream_url=$(yt-dlp -f "bestvideo+bestaudio/best" -g "$movie_url" 2>/dev/null)
+            ;;
+        *)
+            stream_url=$(yt-dlp -f "best" -g "$movie_url" 2>/dev/null)
+            ;;
+    esac
+
+    if [ -z "$stream_url" ]; then
+        stream_url=$(yt-dlp -g "$movie_url" 2>/dev/null)
+    fi
+
+    printf "%s" "$stream_url"
+}
+
+# ===== MX PLAYER PROVIDER (URL only - search unavailable, geo-blocked) =====
+
+get_mxplayer_video_url() {
+    video_url="$1"
+    quality="$2"
+
+    [ "$debug" = 1 ] && printf "\33[2K\r\033[1;33m[MX Player] Extracting video URL: %s\033[0m\n" "$video_url" >&2
+
+    stream_url=""
+
+    # Extract video ID (last 32-char hex segment from URL)
+    video_id=$(printf "%s" "$video_url" | sed -n 's/.*\/\([a-f0-9]\{32\}\)$/\1/p' | sed 's/.*\/\([a-f0-9]\{32\}\)\?watch=true/\1/')
+    [ -z "$video_id" ] && video_id=$(printf "%s" "$video_url" | grep -o '[a-f0-9]\{32\}' | tail -1)
+
+    # Determine type: episode (show) or movie
+    if printf "%s" "$video_url" | grep -q "/show/"; then
+        api_type="episode"
+    else
+        api_type="movie"
+    fi
+
+    [ "$debug" = 1 ] && printf "\33[2K\r\033[1;33m[MX Player] ID: %s, Type: %s\033[0m\n" "$video_id" "$api_type" >&2
+
+    if [ -n "$video_id" ]; then
+        # Try direct API call (new api.mxplayer.in endpoint)
+        api_response=$(curl -sL -A "$agent" \
+            -H "Origin: https://www.mxplayer.in" \
+            -H "Referer: https://www.mxplayer.in/" \
+            "https://api.mxplayer.in/v1/web/detail/video?type=${api_type}&id=${video_id}" 2>/dev/null)
+
+        # Extract stream path from JSON (prefer DASH, fallback to HLS)
+        stream_path=$(printf "%s" "$api_response" | sed -n 's/.*"dash"[^}]*"high"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        [ -z "$stream_path" ] && stream_path=$(printf "%s" "$api_response" | sed -n 's/.*"hls"[^}]*"high"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+
+        if [ -n "$stream_path" ]; then
+            stream_url="https://llvod.mxplay.com/${stream_path}"
+
+            # If quality specified, use yt-dlp on the stream URL for format selection
+            if [ -n "$quality" ] && [ "$quality" != "best" ]; then
+                case "$quality" in
+                    worst)  qformat="worst" ;;
+                    *p|*P)  qformat="bestvideo[height<=$(printf "%s" "$quality" | sed 's/[pP]//')]+bestaudio/best" ;;
+                    *)      qformat="" ;;
+                esac
+                if [ -n "$qformat" ]; then
+                    filtered=$(yt-dlp -f "$qformat" -g "$stream_url" --socket-timeout 15 2>/dev/null)
+                    [ -n "$filtered" ] && stream_url="$filtered"
+                fi
+            fi
+        fi
+    fi
+
+    if [ -z "$stream_url" ]; then
+        printf "\33[2K\r\033[1;33m[MX Player] Could not extract video URL. The content may require login or be unavailable.\033[0m\n" >&2
+    fi
+
+    printf "%s" "$stream_url"
+}
+
+# ===== QUALITY FUNCTIONS =====
+
+select_quality() {
+    qualities=$(printf "best\n1080p\n720p\n480p\n360p\nworst")
+    if [ -n "$quality" ]; then
+        result="$quality"
+    else
+        result=$(printf "%s" "$qualities" | launcher "" "Select quality: ")
+    fi
+    [ -z "$result" ] && result="best"
+    printf "%s" "$result"
+}
+
+# ===== SERIES FUNCTIONS =====
+
+detect_content_type() {
+    if [ "$episode_set" = 1 ] || [ "$range_set" = 1 ]; then
+        printf "series"
+    else
+        printf "movie"
+    fi
+}
+
+select_episode() {
+    printf "\33[2K\r\033[1;34mSeries mode - Enter episode number: \033[0m" && read -r ep_input
+    [ -z "$ep_input" ] && ep_input="1"
+    printf "%s" "$ep_input"
+}
+
+select_episode_range() {
+    printf "\33[2K\r\033[1;34mEnter episode range (e.g. 1-10): \033[0m" && read -r range_input
+    printf "%s" "$range_input"
+}
+
+search_series_episode() {
+    series_name="$1"
+    season_num="$2"
+    episode_num="$3"
+    lang="$4"
+
+    search_query="${series_name} season ${season_num} episode ${episode_num}"
+    [ -n "$lang" ] && [ "$lang" != "all" ] && search_query="${search_query} ${lang}"
+
+    search_youtube "$search_query"
+}
+
+# ===== PLAYBACK & DOWNLOAD =====
+
+get_player_cmd() {
+    case "$(uname -a | cut -d " " -f 1,3-)" in
+        *Darwin*) player_function="${DESI_CLI_PLAYER:-$(where_iina)}" ;;
+        *ndroid*) player_function="${DESI_CLI_PLAYER:-android_mpv}" ;;
+        *MINGW* | *WSL2*) player_function="${DESI_CLI_PLAYER:-mpv.exe}" ;;
+        *ish*) player_function="${DESI_CLI_PLAYER:-iSH}" ;;
+        *) player_function="${DESI_CLI_PLAYER:-$(where_mpv)}" ;;
+    esac
+    printf "%s" "$player_function"
+}
+
+android_mpv() {
+    dir="/storage/emulated/0/mpv"
+    file="$dir/mpv.config.mp4"
+    if [ -w "${dir%*/mpv}" ]; then
+        [ -d "${dir}" ] || mkdir "${dir}"
+        printf "%s" "$3" | sed 's| --|\n|g; s|^--||g' >"$file"
+    fi
+    am start --user 0 -a android.intent.action.VIEW -d "$1" -n is.xyz.mpv/.MPVActivity -e "title" "$2" >/dev/null 2>&1
+    unset dir file
+}
+
+play_video() {
+    video_url="$1"
+    media_title="$2"
+    refr_flag="$3"
+
+    [ -z "$video_url" ] && die "No video URL available!"
+
+    if [ "$debug" = 1 ]; then
+        printf "\33[2K\r\033[1;33m[Debug] Playing: %s\033[0m\n" "$video_url" >&2
+    fi
+
+    case "$player_function" in
+        debug)
+            printf "Video URL:\n%s\n" "$video_url"
+            ;;
+        mpv*)
+            if [ "$no_detach" = 0 ]; then
+                nohup $player_function --tls-verify=no --force-media-title="${media_title}" "$video_url" $refr_flag >/dev/null 2>&1 &
+            else
+                $player_function --tls-verify=no --force-media-title="${media_title}" "$video_url" $refr_flag
+                mpv_exitcode=$?
+                [ "$exit_after_play" = 1 ] && exit "$mpv_exitcode"
+            fi
+            ;;
+        android_mpv) "$player_function" "$video_url" "${media_title}" "--tls-verify=no $refr_flag" 2>&1 & ;;
+        android_vlc) nohup am start --user 0 -a android.intent.action.VIEW -d "$video_url" -n org.videolan.vlc/org.videolan.vlc.gui.video.VideoPlayerActivity -e "title" "${media_title}" >/dev/null 2>&1 & ;;
+        *iina*)
+            [ -n "$refr_flag" ] && refr_flag="--mpv-${refr_flag#--}"
+            if pgrep -f "IINA" >/dev/null 2>&1; then
+                nohup $player_function --no-stdin --mpv-tls-verify=no --mpv-force-media-title="${media_title}" $refr_flag "$video_url" >/dev/null 2>&1 &
+            else
+                nohup $player_function --no-stdin --mpv-tls-verify=no --keep-running --mpv-force-media-title="${media_title}" $refr_flag "$video_url" >/dev/null 2>&1 &
+            fi
+            ;;
+        flatpak_mpv) flatpak run io.mpv.Mpv --tls-verify=no --force-media-title="${media_title}" "$video_url" $refr_flag >/dev/null 2>&1 & ;;
+        vlc*) nohup $player_function --play-and-exit --meta-title="${media_title}" "$video_url" >/dev/null 2>&1 & ;;
+        *yncpla*) nohup $player_function "$video_url" -- --tls-verify=no --force-media-title="${media_title}" $refr_flag >/dev/null 2>&1 & ;;
+        download) ;;
+        catt) nohup catt cast "$video_url" >/dev/null 2>&1 & ;;
+        iSH)
+            printf "\e]8;;vlc://%s\a~~~~~~~~~~~~~~~~~~~~\n~ Tap to open VLC ~\n~~~~~~~~~~~~~~~~~~~~\e]8;;\a\n" "$video_url"
+            sleep 5
+            ;;
+        *) nohup $player_function "$video_url" >/dev/null 2>&1 & ;;
+    esac
+    replay_url="$video_url"
+}
+
+download_video() {
+    video_url="$1"
+    media_title="$2"
+    quality="${3:-best}"
+    refr_flag="$4"
+    download_dir="${DESI_CLI_DOWNLOAD_DIR:-.}"
+
+    [ -z "$video_url" ] && die "No URL available for download!"
+
+    printf "\33[2K\r\033[1;34mDownloading: %s\033[0m\n" "$media_title"
+
+    clean_title=$(printf "%s" "$media_title" | sed 's/[\/:*?"<>|]/_/g')
+
+    case "$quality" in
+        best)   dl_format="bestvideo+bestaudio/best" ;;
+        worst)  dl_format="worst" ;;
+        *p|*P)  h=$(printf "%s" "$quality" | sed 's/[pP]//')
+                dl_format="bestvideo[height<=${h}]+bestaudio/best[height<=${h}]" ;;
+        0)      dl_format="bestvideo+bestaudio/best" ;;
+        *)      dl_format="bestvideo+bestaudio/best" ;;
+    esac
+
+    case "$video_url" in
+        *m3u8*)
+            if command -v "yt-dlp" >/dev/null; then
+                yt-dlp --no-skip-unavailable-fragments --fragment-retries infinite -N 16 -o "${download_dir}/${clean_title}.mp4" "$video_url"
+            else
+                ffmpeg -loglevel error -stats -i "$video_url" -c copy "${download_dir}/${clean_title}.mp4"
+            fi
+            ;;
+        *youtube.com*|*youtu.be*)
+            yt-dlp -f "$dl_format" -o "${download_dir}/${clean_title}.%(ext)s" --merge-output-format mp4 "$video_url"
+            ;;
+        *)
+            if command -v "aria2c" >/dev/null; then
+                aria2c --check-certificate=false --continue --summary-interval=0 -x 16 -s 16 "$video_url" --dir="$download_dir" -o "${clean_title}.mp4" --download-result=hide
+            else
+                yt-dlp -o "${download_dir}/${clean_title}.mp4" "$video_url"
+            fi
+            ;;
+    esac
+
+    printf "\33[2K\r\033[1;32mDownloaded: %s\033[0m\n" "$media_title"
+}
+
+# ===== HISTORY FUNCTIONS =====
+
+update_history() {
+    escaped_url=$(printf "%s" "$media_url" | sed 's|/|\\/|g; s|\.|\\.|g')
+    if grep -qF -- "$media_url" "$histfile" 2>/dev/null; then
+        sed -E "s|^[^	]+	${escaped_url}	[^	]*$|$(date +%s)	${media_url}	${media_title}|" "$histfile" >"${histfile}.new"
+    else
+        cp "$histfile" "${histfile}.new" 2>/dev/null || : >"${histfile}.new"
+        printf "%s\t%s\t%s\n" "$(date +%s)" "$media_url" "$media_title" >>"${histfile}.new"
+    fi
+    mv "${histfile}.new" "$histfile" 2>/dev/null
+}
+
+process_hist_entry() {
+    hist_time="$1"
+    hist_id="$2"
+    hist_title="$3"
+    printf "%s\t%s\t%s (saved)\n" "$hist_id" "$hist_title" "$(date -d @"$hist_time" 2>/dev/null || printf "%s" "$hist_time")"
+}
+
+continue_watching() {
+    history_list=$(while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        hist_time=$(printf "%s" "$line" | cut -f1)
+        hist_id=$(printf "%s" "$line" | cut -f2)
+        hist_title=$(printf "%s" "$line" | cut -f3)
+        process_hist_entry "$hist_time" "$hist_id" "$hist_title"
+    done <"$histfile")
+    wait
+
+    [ -z "$history_list" ] && die "No history found!"
+    [ -z "${index##*[!0-9]*}" ] && id=$(printf "%s" "$history_list" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select from history: " | cut -f1)
+    [ -z "${index##*[!0-9]*}" ] || id=$(printf "%s" "$history_list" | sed -n "${index}p" | cut -f1)
+    [ -z "$id" ] && exit 1
+
+    media_url=$(printf "%s" "$history_list" | grep "$id" | cut -f1 | head -1)
+    media_title=$(printf "%s" "$history_list" | grep "$id" | cut -f2 | head -1)
+
+    printf "%s" "$media_url"
+}
+
+# ===== MAIN =====
+
+# Defaults
+agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
+einthusan_refr="https://einthusan.tv"
+download_dir="${DESI_CLI_DOWNLOAD_DIR:-.}"
+quality="${DESI_CLI_QUALITY:-best}"
+language="${DESI_CLI_LANG:-all}"
+provider="${DESI_CLI_PROVIDER:-auto}"
+no_detach="${DESI_CLI_NO_DETACH:-0}"
+exit_after_play="${DESI_CLI_EXIT_AFTER_PLAY:-0}"
+use_external_menu="${DESI_CLI_EXTERNAL_MENU:-0}"
+external_menu_normal_window="${DESI_CLI_EXTERNAL_MENU_NORMAL_WINDOW:-0}"
+debug="${DESI_CLI_DEBUG:-0}"
+episode_set=0
+range_set=0
+ep_no=""
+range=""
+season="1"
+index=""
+direct_url=""
+cookies_file=""
+search_mode="search"
+content_type="movie"
+player_function=""
+
+[ -t 0 ] || (command -v dmenu && use_external_menu=2)
+[ -t 0 ] || (command -v rofi && use_external_menu=1)
+
+hist_dir="${DESI_CLI_HIST_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/desi-cli}"
+[ ! -d "$hist_dir" ] && mkdir -p "$hist_dir"
+histfile="$hist_dir/desi-hsts"
+[ ! -f "$histfile" ] && : >"$histfile"
+branch="${DESI_CLI_BRANCH:-master}"
+
+# Parse arguments
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -v | --vlc)
+            case "$(uname -a | cut -d " " -f 1,3-)" in
+                *ndroid*) player_function="android_vlc" ;;
+                MINGW* | *WSL2*) player_function="vlc.exe" ;;
+                *ish*) player_function="iSH" ;;
+                *) player_function="vlc" ;;
+            esac
+            ;;
+        -s | --syncplay)
+            case "$(uname -s)" in
+                Darwin*) player_function="/Applications/Syncplay.app/Contents/MacOS/syncplay" ;;
+                MINGW* | *Msys)
+                    export PATH="$PATH":"/c/Program Files (x86)/Syncplay/"
+                    player_function="syncplay.exe"
+                    ;;
+                *) player_function="syncplay" ;;
+            esac
+            ;;
+        -q | --quality)
+            [ $# -lt 2 ] && die "missing argument!"
+            quality="$2"
+            shift
+            ;;
+        -l | --language)
+            [ $# -lt 2 ] && die "missing argument!"
+            language="$2"
+            shift
+            ;;
+        -p | --provider)
+            [ $# -lt 2 ] && die "missing argument!"
+            provider="$2"
+            shift
+            ;;
+        -S | --select-nth)
+            [ $# -lt 2 ] && die "missing argument!"
+            index="$2"
+            shift
+            ;;
+        -c | --continue) search_mode=history ;;
+        -d | --download) player_function=download ;;
+        -D | --delete)
+            : >"$histfile"
+            exit 0
+            ;;
+        -e | --episode)
+            [ $# -lt 2 ] && die "missing argument!"
+            ep_no="$2"
+            episode_set=1
+            shift
+            ;;
+        -r | --range)
+            [ $# -lt 2 ] && die "missing argument!"
+            range="$2"
+            range_set=1
+            shift
+            ;;
+        --season)
+            [ $# -lt 2 ] && die "missing argument!"
+            season="$2"
+            shift
+            ;;
+        --url)
+            [ $# -lt 2 ] && die "missing argument!"
+            direct_url="$2"
+            provider="url"
+            shift
+            ;;
+        --cookies-file)
+            [ $# -lt 2 ] && die "missing argument!"
+            cookies_file="$2"
+            shift
+            ;;
+        --debug) debug=1 ;;
+        --no-detach) no_detach=1 ;;
+        --exit-after-play) exit_after_play=1 && no_detach=1 ;;
+        --rofi) use_external_menu=1 ;;
+        --dmenu) use_external_menu=2 ;;
+        -V | --version) version_info ;;
+        -h | --help) help_info ;;
+        -U | --update)
+            branch="${2:-$branch}"
+            update_script
+            ;;
+        *) query="$(printf "%s" "$query $1" | sed "s|^ ||;s| |+|g")" ;;
+    esac
+    shift
+done
+
+# Setup player
+[ -z "$player_function" ] && player_function=$(get_player_cmd)
+
+# Done parsing, start main flow
+printf "\33[2K\r\033[1;34mChecking dependencies...\033[0m\n"
+dep_ch "curl" "sed" "grep" || true
+dep_ch "yt-dlp" || die "yt-dlp not found. Install it: https://github.com/yt-dlp/yt-dlp"
+
+case "$player_function" in
+    debug) ;;
+    download) dep_ch "ffmpeg" "aria2c" || dep_ch "yt-dlp" ;;
+    android*) ;;
+    iSH*) ;;
+    flatpak_mpv) true ;;
+    *) dep_ch "$player_function" || true ;;
+esac
+dep_ch "fzf" || true
+
+trap 'cleanup; exit 1' INT HUP
+
+# Search / Content selection
+case "$search_mode" in
+    history)
+        result_url=$(continue_watching)
+        [ -z "$result_url" ] && exit 1
+        media_url="$result_url"
+        media_title=$(printf "%s" "$media_title" | sed 's/ (saved)//')
+        quality=$(select_quality)
+
+        printf "\33[2K\r\033[1;36mResuming: %s\033[0m\n" "$media_title"
+
+        case "$provider" in
+            einthusan)
+                video_url=$(get_einthusan_video_url "$media_url" "$quality")
+                refr_flag="--referrer=${einthusan_refr}"
+                ;;
+            mxplayer)
+                video_url=$(get_mxplayer_video_url "$media_url" "$quality")
+                refr_flag=""
+                ;;
+            zee5*)
+                >&2 printf "\33[2K\r\033[1;33m[ZEE5] Opening in browser (DRM-protected)...\033[0m\n"
+                open_browser "$media_url"
+                video_url="$media_url"
+                refr_flag=""
+                ;;
+            *)
+                video_url=$(yt-dlp -f "best[acodec!=?none]/best" -g "$media_url" --socket-timeout 15 2>/dev/null)
+                refr_flag=""
+                ;;
+        esac
+
+        if [ "$player_function" = "download" ]; then
+            download_video "$media_url" "$media_title" "$quality"
+            exit 0
+        fi
+
+        play_video "$video_url" "$media_title" "$refr_flag"
+        exit 0
+        ;;
+    *)
+        if [ "$use_external_menu" = "0" ]; then
+            while [ -z "$query" ]; do
+                printf "\33[2K\r\033[1;36mSearch movies/series: \033[0m" && read -r query
+            done
+        else
+            [ -z "$query" ] && query=$(printf "" | external_menu "" "Search movies/series: " "$external_menu_args")
+            [ -z "$query" ] && exit 1
+        fi
+        query=$(printf "%s" "$query" | sed "s| |+|g")
+
+        if [ "$provider" = "auto" ]; then
+            select_provider
+        fi
+
+        if [ -z "$language" ]; then
+            select_language
+        fi
+
+        # Determine content type
+        if [ "$episode_set" = 1 ] || [ "$range_set" = 1 ]; then
+            content_type="series"
+        else
+            printf "\33[2K\r\033[1;36mIs this a series? (y/N): \033[0m" && read -r is_series
+            case "$is_series" in
+                y | Y | yes | Yes) content_type="series" ;;
+                *) content_type="movie" ;;
+            esac
+        fi
+
+        search_query=$(build_search_query "$query" "$language" "$content_type")
+
+        printf "\33[2K\r\033[1;34mSearching...\033[0m\n"
+
+        # Handle URL provider vs search provider
+        if [ "$provider" = "url" ]; then
+            if [ -z "$direct_url" ]; then
+                printf "\33[2K\r\033[1;36mEnter URL: \033[0m" && read -r direct_url
+            fi
+            [ -z "$direct_url" ] && die "No URL provided!"
+            media_url="$direct_url"
+            media_title=$(printf "%s" "$direct_url" | sed 's|.*/||;s|/?$||')
+            media_id="$media_title"
+            quality=$(select_quality)
+
+            printf "\33[2K\r\033[1;34mFetching video URL...\033[0m\n"
+            case "$direct_url" in
+                *einthusan*)
+                    einth_stream=$(get_einthusan_video_url "$direct_url" "$quality")
+                    refr_flag="--referrer=${einthusan_refr}"
+                    if [ "$player_function" = "download" ]; then
+                        [ -z "$einth_stream" ] && die "Could not extract video from Einthusan URL!"
+                        download_video "$einth_stream" "$media_title" "$quality" && exit 0
+                    fi
+                    video_url="$einth_stream"
+                    [ -z "$video_url" ] && die "Could not extract video from Einthusan URL!"
+                    ;;
+                *mxplayer*)
+                    [ "$player_function" = "download" ] && download_video "$media_url" "$media_title" "$quality" && exit 0
+                    video_url=$(get_mxplayer_video_url "$direct_url" "$quality")
+                    refr_flag=""
+                    [ -z "$video_url" ] && die "Could not extract video from MX Player URL!"
+                    ;;
+                *zee5*)
+                    if [ "$player_function" = "download" ]; then
+                        >&2 printf "\33[2K\r\033[1;33m[ZEE5] Cannot download: content is DRM-protected.\033[0m\n"
+                        >&2 printf "\33[2K\r\033[1;33m[ZEE5] Use --cookies-from-browser chrome and yt-dlp directly to try extraction.\033[0m\n"
+                        die "ZEE5 downloads not supported (DRM)."
+                    fi
+                    >&2 printf "\33[2K\r\033[1;33m[ZEE5] Opening in browser (DRM-protected)...\033[0m\n"
+                    open_browser "$media_url"
+                    video_url="$media_url"
+                    refr_flag=""
+                    ;;
+                *)
+                    [ "$player_function" = "download" ] && download_video "$media_url" "$media_title" "$quality" && exit 0
+                    video_url=$(yt-dlp -f "best[acodec!=?none]/best" -g "$direct_url" --socket-timeout 15 2>/dev/null)
+                    refr_flag=""
+                    [ -z "$video_url" ] && video_url=$(yt-dlp -g "$direct_url" --socket-timeout 20 2>/dev/null)
+                    [ -z "$video_url" ] && die "Could not extract video from URL!"
+                    ;;
+            esac
+            update_history
+            tput cuu1 && tput el
+            tput sc
+            play_video "$video_url" "$media_title" "$refr_flag"
+            [ "$player_function" = "debug" ] && exit 0
+        else
+            # Search by provider
+            case "$provider" in
+                zee5)
+                    results=$(search_zee5 "$search_query")
+                    ;;
+                *)
+                    results=$(search_youtube "$search_query")
+                    ;;
+            esac
+            [ -z "$results" ] && die "No results found!"
+
+            [ -n "$index" ] && [ "$index" -eq "$index" ] 2>/dev/null && result=$(printf "%s" "$results" | sed -n "${index}p")
+            [ -z "$index" ] && result=$(printf "%s" "$results" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select result: ")
+            [ -z "$result" ] && exit 1
+
+            media_url=$(printf "%s" "$result" | cut -f2)
+            media_title=$(printf "%s" "$result" | cut -f3)
+            media_id=$(printf "%s" "$media_url" | sed 's|.*/||;s|/?$||')
+
+            # Offer ZEE5 alternative for YouTube results
+            if [ "$provider" = "youtube" ]; then
+                printf "\33[2K\r\033[1;36mTry ZEE5 instead? (better quality, no ads) (y/N): \033[0m" && read -r try_zee5
+                case "$try_zee5" in
+                    y|Y|yes|Yes)
+                        clean_title=$(printf "%s" "$media_title" | sed 's/\[[^]]*\]//g; s/|.*//; s/([^)]*)//g; s/  */ /g; s/^ *//; s/ *$//')
+                        [ -z "$clean_title" ] && clean_title="$media_title"
+                        zee5_results=$(search_zee5 "$clean_title")
+                        if [ -n "$zee5_results" ]; then
+                            zee5_result=$(printf "%s" "$zee5_results" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select ZEE5 result: ")
+                            if [ -n "$zee5_result" ]; then
+                                media_url=$(printf "%s" "$zee5_result" | cut -f2)
+                                media_title=$(printf "%s" "$zee5_result" | cut -f3)
+                                provider="zee5"
+                            fi
+                        else
+                            printf "\33[2K\r\033[1;33mNo ZEE5 results found. Playing from YouTube.\033[0m\n"
+                        fi
+                        ;;
+                esac
+            fi
+
+            if [ "$content_type" = "series" ] && [ "$provider" != "zee5" ]; then
+                if [ -z "$ep_no" ]; then
+                    ep_no=$(select_episode)
+                fi
+                if [ -z "$range" ]; then
+                    range="$ep_no"
+                fi
+                series_query=$(build_search_query "$query" "$language" "")
+                search_results=$(search_series_episode "$series_query" "$season" "$ep_no" "$language")
+                [ -z "$search_results" ] && die "Episode not found!"
+                ep_result=$(printf "%s" "$search_results" | nl -w 2 | sed 's/^[[:space:]]//' | nth "Select episode source: ")
+                [ -z "$ep_result" ] && exit 1
+                media_url=$(printf "%s" "$ep_result" | cut -f2)
+                media_title=$(printf "%s" "$ep_result" | cut -f3)
+                media_id=$(printf "%s" "$media_url" | sed 's|.*/||;s|/?$||')
+            fi
+
+            quality=$(select_quality)
+            printf "\33[2K\r\033[1;34mFetching video URL...\033[0m\n"
+
+            case "$provider" in
+                zee5*)
+                    if [ "$player_function" = "download" ]; then
+                        >&2 printf "\33[2K\r\033[1;33m[ZEE5] Cannot download: content is DRM-protected.\033[0m\n"
+                        die "ZEE5 downloads not supported (DRM)."
+                    fi
+                    >&2 printf "\33[2K\r\033[1;33m[ZEE5] Opening in browser (DRM-protected)...\033[0m\n"
+                    open_browser "$media_url"
+                    video_url="$media_url"
+                    refr_flag=""
+                    ;;
+                *)
+                    video_url=$(get_youtube_video_url "$media_url" "$quality")
+                    refr_flag=""
+                    if [ -z "$video_url" ]; then
+                        die "Could not extract video URL from YouTube!"
+                    fi
+                    ;;
+            esac
+
+            [ "$player_function" = "download" ] && download_video "$media_url" "$media_title" "$quality" && exit 0
+            update_history
+            tput cuu1 && tput el
+            tput sc
+            play_video "$video_url" "$media_title" "$refr_flag"
+            [ "$player_function" = "debug" ] && exit 0
+        fi
+
+        # Post-play menu
+        while cmd=$(printf "replay\nchange_quality\nnew_search\nquit" | nth "Playing: $media_title"); do
+            case "$cmd" in
+                replay)
+                    play_video "$replay_url" "$media_title" "$refr_flag"
+                    ;;
+                change_quality)
+                    new_quality=$(select_quality)
+                    case "$provider" in
+                        url)
+                            case "$media_url" in
+                                *einthusan*) video_url=$(get_einthusan_video_url "$media_url" "$new_quality") ;;
+                                *mxplayer*) video_url=$(get_mxplayer_video_url "$media_url" "$new_quality") ;;
+                                        *) video_url=$(yt-dlp -f "best[acodec!=?none]/best" -g "$media_url" --socket-timeout 15 2>/dev/null) ;;
+                            esac
+                            ;;
+                        zee5*)
+                            >&2 printf "\33[2K\r\033[1;33m[ZEE5] Reopening in browser...\033[0m\n"
+                            open_browser "$media_url"
+                            video_url="$media_url"
+                            ;;
+                        *) video_url=$(get_youtube_video_url "$media_url" "$new_quality") ;;
+                    esac
+                    play_video "$video_url" "$media_title" "$refr_flag"
+                    ;;
+                new_search)
+                    exec "$0"
+                    ;;
+                *)
+                    cleanup
+                    exit 0
+                    ;;
+            esac
+        done
+        ;;
+esac
+
+cleanup
+
+# desi-cli
+# A CLI tool to browse and watch Indian movies & TV series
+# Inspired by ani-cli (https://github.com/pystardust/ani-cli)
+# License: GPL-3.0
